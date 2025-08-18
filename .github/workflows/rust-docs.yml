@@ -17,7 +17,7 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
     paths:
-      - 'rust/**'
+      - '**'
       - '.github/workflows/rust-docs.yml'
 
   # Allow manual triggering for urgent documentation updates and debugging
