@@ -205,7 +205,7 @@ jobs:
           # Update/create the specific docs folder for this deployment
           rm -rf "${DOCS_FOLDER}" || true
           mkdir -p "${DOCS_FOLDER}"
-          mkdir tmp_dir
+          mkdir tmp_dir || true
           cd tmp_dir
           echo "hello world ${DOCS_FOLDER}" > hello_world.txt
           cd ..
