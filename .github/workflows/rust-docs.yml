@@ -429,4 +429,4 @@ jobs:
               body: comment
             });
 
-            console.log(\`Added cleanup notification to PR #\${prNumber}\`);
+            console.log(`Added cleanup notification to PR #${prNumber}`);
