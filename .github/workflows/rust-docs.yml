@@ -210,6 +210,7 @@ jobs:
           echo "hello world ${DOCS_FOLDER}" > hello_world.txt
           cd ..
           cp -r tmp_dir/* "${DOCS_FOLDER}/"
+          rm -rf tmp_dir
 
           # Commit and force push (erases all previous history)
           git add .
