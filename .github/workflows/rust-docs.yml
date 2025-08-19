@@ -27,11 +27,58 @@ permissions:
   pull-requests: write # Required to comment on PRs with preview links
 
 jobs:
+  # Check if we should proceed with documentation build
+  check-context:
+    name: Check Build Context
+    runs-on: ubuntu-latest
+    outputs:
+      should-build: ${{ steps.context.outputs.should-build }}
+      is-pr: ${{ steps.context.outputs.is-pr }}
+      pr-number: ${{ steps.context.outputs.pr-number }}
+      branch-name: ${{ steps.context.outputs.branch-name }}
+
+    steps:
+      - name: Determine build context
+        id: context
+        run: |
+          BRANCH_NAME="${{ github.ref_name }}"
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "should-build=true" >> $GITHUB_OUTPUT
+            echo "is-pr=true" >> $GITHUB_OUTPUT
+            echo "pr-number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+            echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+            echo "✅ PR context detected: #${{ github.event.pull_request.number }} on branch ${BRANCH_NAME}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER=$(gh pr list --head "$BRANCH_NAME" --state open --json number --jq '.[0].number // empty')
+            if [ -n "$PR_NUMBER" ]; then
+              echo "should-build=true" >> $GITHUB_OUTPUT
+              echo "is-pr=true" >> $GITHUB_OUTPUT
+              echo "pr-number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+              echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+              echo "✅ Found active PR #${PR_NUMBER} for branch ${BRANCH_NAME}"
+            else
+              echo "should-build=false" >> $GITHUB_OUTPUT
+              echo "is-pr=false" >> $GITHUB_OUTPUT
+              echo "::error::No active PR found for branch ${BRANCH_NAME}. Documentation build cancelled."
+              echo "::notice::To build documentation, either create a PR from this branch or push to main."
+              exit 1
+            fi
+          else
+            echo "should-build=true" >> $GITHUB_OUTPUT
+            echo "is-pr=false" >> $GITHUB_OUTPUT
+            echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+            echo "✅ Main branch context detected: ${BRANCH_NAME}"
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # Test documentation (runs in parallel for fast feedback)
   test-docs:
     name: Test Documentation
     runs-on: ubuntu-latest
-    if: github.event.action != 'closed'
+    needs: check-context
+    if: needs.check-context.outputs.should-build == 'true' && github.event.action != 'closed'
 
     env:
       SCCACHE_GHA_ENABLED: "true"
@@ -61,13 +108,13 @@ jobs:
       #   run: make rust-doc-test
 
       - name: Comment on PR about test failure
-        if: failure() && github.event_name == 'pull_request'
+        if: failure() && needs.check-context.outputs.is-pr == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = context.payload.pull_request.number;
-            const branchName = context.payload.pull_request.head.ref;
-            const commitSha = context.payload.pull_request.head.sha.substring(0, 7);
+            const prNumber = '${{ needs.check-context.outputs.pr-number }}';
+            const branchName = '${{ needs.check-context.outputs.branch-name }}';
+            const commitSha = context.sha.substring(0, 7);
             const workflowUrl = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
 
             const comment = `## ❌ Documentation Tests Failed
@@ -104,8 +151,8 @@ jobs:
   build-and-deploy:
     name: Build and Deploy Documentation
     runs-on: ubuntu-latest
-    needs: test-docs
-    if: github.event.action != 'closed'
+    needs: [check-context, test-docs]
+    if: needs.check-context.outputs.should-build == 'true' && github.event.action != 'closed'
 
     # Global deployment queue: Prevent race conditions on gh-pages branch
     concurrency:
@@ -142,15 +189,16 @@ jobs:
       - name: Prepare deployment variables
         id: deployment-vars
         run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            PR_NUMBER="${{ github.event.pull_request.number }}"
-            DOCS_FOLDER="pr-${PR_NUMBER}"
-            COMMIT_MESSAGE="Update documentation for PR #${PR_NUMBER}"
-            BRANCH_NAME="${{ github.head_ref }}"
+          BRANCH_NAME="${{ needs.check-context.outputs.branch-name }}"
+          IS_PR="${{ needs.check-context.outputs.is-pr }}"
+          PR_NUMBER="${{ needs.check-context.outputs.pr-number }}"
+
+          if [ "$IS_PR" = "true" ]; then
+            DOCS_FOLDER="${BRANCH_NAME}"
+            COMMIT_MESSAGE="Update documentation for PR #${PR_NUMBER} (branch: ${BRANCH_NAME})"
           else
             DOCS_FOLDER="main"
             COMMIT_MESSAGE="Update main branch documentation"
-            BRANCH_NAME="${{ github.ref_name }}"
           fi
 
           echo "docs-folder=${DOCS_FOLDER}" >> $GITHUB_OUTPUT
@@ -223,13 +271,13 @@ jobs:
           echo "🚀 Documentation available at: ${DEPLOYMENT_URL}"
 
       - name: Comment on PR about deployment failure
-        if: failure() && github.event_name == 'pull_request'
+        if: failure() && needs.check-context.outputs.is-pr == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = context.payload.pull_request.number;
-            const branchName = context.payload.pull_request.head.ref;
-            const commitSha = context.payload.pull_request.head.sha.substring(0, 7);
+            const prNumber = '${{ needs.check-context.outputs.pr-number }}';
+            const branchName = '${{ needs.check-context.outputs.branch-name }}';
+            const commitSha = context.sha.substring(0, 7);
             const workflowUrl = `https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}`;
 
             const comment = `## ❌ Documentation Deployment Failed
@@ -263,15 +311,14 @@ jobs:
             console.log(`Added failure notification to PR #${prNumber}`);
 
       - name: Comment on PR with deployment URL
-        if: success() && github.event_name == 'pull_request'
+        if: success() && needs.check-context.outputs.is-pr == 'true'
         uses: actions/github-script@v7
         with:
           script: |
             const deploymentUrl = process.env.DEPLOYMENT_URL;
-            const branchName = '${{ steps.deployment-vars.outputs.branch-name }}';
-            const docsFolder = '${{ steps.deployment-vars.outputs.docs-folder }}';
-            const prNumber = context.payload.pull_request.number;
-            const commitSha = context.payload.pull_request.head.sha.substring(0, 7);
+            const branchName = '${{ needs.check-context.outputs.branch-name }}';
+            const prNumber = '${{ needs.check-context.outputs.pr-number }}';
+            const commitSha = context.sha.substring(0, 7);
 
             const comment = `## 📚 Documentation Preview
 
@@ -282,12 +329,12 @@ jobs:
             **📋 Deployment Details:**
             - **Branch:** \`${branchName}\`
             - **Commit:** \`${commitSha}\`
-            - **Folder:** \`${docsFolder}/\`
+            - **Folder:** \`${branchName}/\`
             - **URL:** \`${deploymentUrl}\`
 
-            > **Note:** This documentation is hosted in the \`${docsFolder}/\` folder on the gh-pages branch.
+            > **Note:** This documentation is hosted in the \`${branchName}/\` folder on the gh-pages branch.
             > The URL will remain accessible until the PR is closed and cleaned up.
-            > Each PR gets its own unique documentation folder.
+            > Each branch gets its own unique documentation folder.
 
             ---
             *🤖 Generated by GitHub Actions*`;
@@ -356,8 +403,8 @@ jobs:
     steps:
       - name: Remove PR documentation with clean history
         run: |
+          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
           PR_NUMBER="${{ github.event.pull_request.number }}"
-          PR_FOLDER="pr-${PR_NUMBER}"
 
           # Clone gh-pages branch
           git clone --single-branch --branch gh-pages https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git gh-pages-repo
@@ -367,27 +414,27 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
 
-          if [ -d "$PR_FOLDER" ]; then
-            echo "Removing documentation folder: $PR_FOLDER"
+          if [ -d "$BRANCH_NAME" ]; then
+            echo "Removing documentation folder: $BRANCH_NAME"
 
             # Create fresh orphan branch (erases all history)
             git checkout --orphan temp-branch
             git rm -rf . || true
 
-            # Copy all folders except the PR folder we're removing
+            # Copy all folders except the branch folder we're removing
             git checkout gh-pages -- . || true
-            rm -rf "$PR_FOLDER"
+            rm -rf "$BRANCH_NAME"
 
             # Commit and force push (erases all previous history)
             git add .
-            git commit -m "Remove documentation for PR #${PR_NUMBER}"
+            git commit -m "Remove documentation for branch ${BRANCH_NAME} (PR #${PR_NUMBER})"
             git branch -D gh-pages || true
             git branch -m gh-pages
             git push --force origin gh-pages
 
             echo "FOLDER_REMOVED=true" >> $GITHUB_ENV
           else
-            echo "Documentation folder $PR_FOLDER not found, nothing to clean up"
+            echo "Documentation folder $BRANCH_NAME not found, nothing to clean up"
             echo "FOLDER_REMOVED=false" >> $GITHUB_ENV
           fi
 
@@ -406,11 +453,11 @@ jobs:
             **📋 Cleanup Details:**
             - **PR:** #${prNumber}
             - **Branch:** \`${branchName}\`
-            - **Folder:** \`pr-${prNumber}/\`
+            - **Folder:** \`${branchName}/\`
             - **Status:** ${folderRemoved ? 'Successfully removed from gh-pages branch' : 'No documentation folder found'}
 
             > **Note:** The preview documentation is no longer accessible.
-            > The \`pr-${prNumber}/\` folder has been removed from the gh-pages branch.
+            > The \`${branchName}/\` folder has been removed from the gh-pages branch.
             > Git history has been cleaned to keep the branch lightweight.
 
             ---
