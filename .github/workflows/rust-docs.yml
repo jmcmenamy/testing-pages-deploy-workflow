@@ -16,10 +16,19 @@ on:
 
   # Allow manual triggering for urgent documentation updates and debugging
   workflow_dispatch:
+    inputs:
+      action:
+        description: 'Action to perform'
+        required: true
+        default: 'build'
+        type: choice
+        options:
+          - build
+          - delete
 
-# Per-PR concurrency: Cancel older runs of the same PR to avoid redundant work
+# Per-branch concurrency: Cancel older runs of the same branch to avoid redundant work
 concurrency:
-  group: ${{ github.event_name == 'pull_request' && format('docs-pr-{0}', github.event.pull_request.number) || 'docs-main' }}
+  group: ${{ github.event_name == 'pull_request' && format('docs-branch-{0}', github.event.pull_request.head.ref) || github.event_name == 'workflow_dispatch' && format('docs-branch-{0}', github.ref_name) || 'docs-main' }}
   cancel-in-progress: true
 
 permissions:
@@ -33,6 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should-build: ${{ steps.context.outputs.should-build }}
+      should-delete: ${{ steps.context.outputs.should-delete }}
       is-pr: ${{ steps.context.outputs.is-pr }}
       pr-number: ${{ steps.context.outputs.pr-number }}
       branch-name: ${{ steps.context.outputs.branch-name }}
@@ -41,31 +51,57 @@ jobs:
       - name: Determine build context
         id: context
         run: |
-          BRANCH_NAME="${{ github.ref_name }}"
-
           if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
             echo "should-build=true" >> $GITHUB_OUTPUT
+            echo "should-delete=false" >> $GITHUB_OUTPUT
             echo "is-pr=true" >> $GITHUB_OUTPUT
             echo "pr-number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
             echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
             echo "✅ PR context detected: #${{ github.event.pull_request.number }} on branch ${BRANCH_NAME}"
           elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            BRANCH_NAME="${{ github.ref_name }}"
+            ACTION="${{ github.event.inputs.action }}"
+
+            # Check if there's an active PR for this branch (common logic)
             PR_NUMBER=$(gh pr list --head "$BRANCH_NAME" --state open --json number --jq '.[0].number // empty')
-            if [ -n "$PR_NUMBER" ]; then
-              echo "should-build=true" >> $GITHUB_OUTPUT
-              echo "is-pr=true" >> $GITHUB_OUTPUT
-              echo "pr-number=${PR_NUMBER}" >> $GITHUB_OUTPUT
-              echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
-              echo "✅ Found active PR #${PR_NUMBER} for branch ${BRANCH_NAME}"
+
+            if [ "$ACTION" = "delete" ]; then
+              if [ -n "$PR_NUMBER" ]; then
+                echo "should-build=false" >> $GITHUB_OUTPUT
+                echo "should-delete=true" >> $GITHUB_OUTPUT
+                echo "is-pr=true" >> $GITHUB_OUTPUT
+                echo "pr-number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+                echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+                echo "🗑️ Delete action requested for PR #${PR_NUMBER} on branch ${BRANCH_NAME}"
+              else
+                echo "should-build=false" >> $GITHUB_OUTPUT
+                echo "should-delete=true" >> $GITHUB_OUTPUT
+                echo "is-pr=false" >> $GITHUB_OUTPUT
+                echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+                echo "🗑️ Delete action requested for branch ${BRANCH_NAME}"
+              fi
             else
-              echo "should-build=false" >> $GITHUB_OUTPUT
-              echo "is-pr=false" >> $GITHUB_OUTPUT
-              echo "::error::No active PR found for branch ${BRANCH_NAME}. Documentation build cancelled."
-              echo "::notice::To build documentation, either create a PR from this branch or push to main."
-              exit 1
+              # For build action, require an active PR
+              if [ -n "$PR_NUMBER" ]; then
+                echo "should-build=true" >> $GITHUB_OUTPUT
+                echo "should-delete=false" >> $GITHUB_OUTPUT
+                echo "is-pr=true" >> $GITHUB_OUTPUT
+                echo "pr-number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+                echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+                echo "✅ Found active PR #${PR_NUMBER} for branch ${BRANCH_NAME}"
+              else
+                echo "should-build=false" >> $GITHUB_OUTPUT
+                echo "should-delete=false" >> $GITHUB_OUTPUT
+                echo "is-pr=false" >> $GITHUB_OUTPUT
+                echo "::error::No active PR found for branch ${BRANCH_NAME}. Documentation build cancelled."
+                echo "::notice::To build documentation, either create a PR from this branch or push to main."
+                exit 1
+              fi
             fi
           else
             echo "should-build=true" >> $GITHUB_OUTPUT
+            echo "should-delete=false" >> $GITHUB_OUTPUT
             echo "is-pr=false" >> $GITHUB_OUTPUT
             echo "branch-name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
             echo "✅ Main branch context detected: ${BRANCH_NAME}"
@@ -389,11 +425,12 @@ jobs:
             echo "Documentation is stored in the \`${{ steps.deployment-vars.outputs.docs-folder }}/\` folder on the gh-pages branch." >> $GITHUB_STEP_SUMMARY
           fi
 
-  # Clean up PR documentation when PR is closed
+  # Clean up PR documentation when PR is closed or manual deletion is requested
   cleanup-pr-docs:
     name: Clean up PR Documentation
     runs-on: ubuntu-latest
-    if: github.event.action == 'closed' && github.event.pull_request
+    needs: check-context
+    if: (github.event.action == 'closed' && github.event.pull_request) || needs.check-context.outputs.should-delete == 'true'
 
     # Global deployment queue: Prevent race conditions on gh-pages branch
     concurrency:
@@ -401,13 +438,26 @@ jobs:
       cancel-in-progress: false
 
     steps:
-      - name: Remove PR documentation with clean history
+      - name: Remove documentation with clean history
         run: |
-          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-          PR_NUMBER="${{ github.event.pull_request.number }}"
+          # Determine context: PR closure or manual deletion
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+            PR_NUMBER="${{ github.event.pull_request.number }}"
+            IS_PR="true"
+            DELETION_TYPE="PR closure"
+          else
+            BRANCH_NAME="${{ needs.check-context.outputs.branch-name }}"
+            PR_NUMBER="${{ needs.check-context.outputs.pr-number }}"
+            IS_PR="${{ needs.check-context.outputs.is-pr }}"
+            DELETION_TYPE="manual workflow dispatch"
+          fi
 
           # Clone gh-pages branch
-          git clone --single-branch --branch gh-pages https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git gh-pages-repo
+          git clone --single-branch --branch gh-pages https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git gh-pages-repo || {
+            echo "::warning::gh-pages branch doesn't exist, nothing to delete"
+            exit 0
+          }
           cd gh-pages-repo
 
           # Configure git
@@ -415,7 +465,7 @@ jobs:
           git config --local user.name "GitHub Action"
 
           if [ -d "$BRANCH_NAME" ]; then
-            echo "Removing documentation folder: $BRANCH_NAME"
+            echo "Removing documentation folder: $BRANCH_NAME (triggered by: $DELETION_TYPE)"
 
             # Create fresh orphan branch (erases all history)
             git checkout --orphan temp-branch
@@ -427,41 +477,60 @@ jobs:
 
             # Commit and force push (erases all previous history)
             git add .
-            git commit -m "Remove documentation for branch ${BRANCH_NAME} (PR #${PR_NUMBER})"
+            if [ "$IS_PR" = "true" ]; then
+              if [ "${{ github.event_name }}" = "pull_request" ]; then
+                git commit -m "Remove documentation for branch ${BRANCH_NAME} (PR #${PR_NUMBER} closed)"
+              else
+                git commit -m "Manual deletion of documentation for branch ${BRANCH_NAME} (PR #${PR_NUMBER})"
+              fi
+            else
+              git commit -m "Manual deletion of documentation for branch ${BRANCH_NAME}"
+            fi
             git branch -D gh-pages || true
             git branch -m gh-pages
             git push --force origin gh-pages
 
             echo "FOLDER_REMOVED=true" >> $GITHUB_ENV
+            echo "✅ Successfully removed documentation folder: $BRANCH_NAME"
           else
-            echo "Documentation folder $BRANCH_NAME not found, nothing to clean up"
+            echo "Documentation folder $BRANCH_NAME not found, nothing to delete"
             echo "FOLDER_REMOVED=false" >> $GITHUB_ENV
           fi
 
+          # Export variables for comment step
+          echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
+          echo "PR_NUMBER=${PR_NUMBER}" >> $GITHUB_ENV
+          echo "IS_PR=${IS_PR}" >> $GITHUB_ENV
+          echo "DELETION_TYPE=${DELETION_TYPE}" >> $GITHUB_ENV
+
       - name: Add cleanup comment to PR
+        if: (github.event_name == 'pull_request') || (needs.check-context.outputs.is-pr == 'true')
         uses: actions/github-script@v7
         with:
           script: |
-            const prNumber = context.payload.pull_request.number;
-            const branchName = context.payload.pull_request.head.ref;
+            const prNumber = process.env.PR_NUMBER;
+            const branchName = process.env.BRANCH_NAME;
             const folderRemoved = process.env.FOLDER_REMOVED === 'true';
+            const deletionType = process.env.DELETION_TYPE;
+            const isManualDeletion = deletionType === 'manual workflow dispatch';
 
-            const comment = `## 🧹 Documentation Cleanup
+            const comment = `## ${isManualDeletion ? '🗑️ Manual Documentation Deletion' : '🧹 Documentation Cleanup'}
 
-            The documentation preview for this PR has been cleaned up.
+            The documentation ${isManualDeletion ? 'for this PR has been manually deleted' : 'preview for this PR has been cleaned up'}.
 
-            **📋 Cleanup Details:**
+            **📋 ${isManualDeletion ? 'Deletion' : 'Cleanup'} Details:**
             - **PR:** #${prNumber}
             - **Branch:** \`${branchName}\`
             - **Folder:** \`${branchName}/\`
             - **Status:** ${folderRemoved ? 'Successfully removed from gh-pages branch' : 'No documentation folder found'}
+            ${isManualDeletion ? '- **Triggered by:** Manual workflow dispatch' : ''}
 
-            > **Note:** The preview documentation is no longer accessible.
+            > **Note:** ${isManualDeletion ? 'This was a manual deletion triggered via workflow dispatch.' : 'The preview documentation is no longer accessible.'}
             > The \`${branchName}/\` folder has been removed from the gh-pages branch.
             > Git history has been cleaned to keep the branch lightweight.
 
             ---
-            *🤖 Cleanup completed by GitHub Actions*`;
+            *🤖 ${isManualDeletion ? 'Manual deletion' : 'Cleanup'} completed by GitHub Actions*`;
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -470,4 +539,4 @@ jobs:
               body: comment
             });
 
-            console.log(`Added cleanup notification to PR #${prNumber}`);
+            console.log(`Added ${isManualDeletion ? 'manual deletion' : 'cleanup'} notification to PR #${prNumber}`);
