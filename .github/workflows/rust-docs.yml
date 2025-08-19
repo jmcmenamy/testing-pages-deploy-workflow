@@ -249,7 +249,7 @@ jobs:
           mkdir -p "${DOCS_FOLDER}"
           mkdir tmp_dir || true
           cd tmp_dir
-          echo "helloo world ${DOCS_FOLDER}" > hello_world.txt
+          echo "hellooooo world ${DOCS_FOLDER}" > hello_world.txt
           cd ..
           cp -r tmp_dir/* "${DOCS_FOLDER}/"
           rm -rf tmp_dir
