@@ -9,16 +9,10 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'rust/**'
-      - '.github/workflows/rust-docs.yml'
 
   # Deploy preview docs on pull requests and handle cleanup
   pull_request:
     types: [opened, synchronize, reopened, closed]
-    paths:
-      - '**'
-      - '.github/workflows/rust-docs.yml'
 
   # Allow manual triggering for urgent documentation updates and debugging
   workflow_dispatch:
