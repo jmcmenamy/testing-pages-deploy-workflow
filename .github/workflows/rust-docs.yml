@@ -98,7 +98,7 @@ jobs:
               body: comment
             });
 
-            console.log(\`Added test failure notification to PR #\${prNumber}\`);
+            console.log(`Added test failure notification to PR #${prNumber}`);
 
   # Build and deploy documentation (waits for tests to pass)
   build-and-deploy:
@@ -260,7 +260,7 @@ jobs:
               body: comment
             });
 
-            console.log(\`Added failure notification to PR #\${prNumber}\`);
+            console.log(`Added failure notification to PR #${prNumber}`);
 
       - name: Comment on PR with deployment URL
         if: success() && github.event_name == 'pull_request'
