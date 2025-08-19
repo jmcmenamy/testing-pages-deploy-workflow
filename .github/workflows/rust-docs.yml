@@ -222,6 +222,9 @@ jobs:
           echo "DEPLOYMENT_URL=${DEPLOYMENT_URL}" >> $GITHUB_ENV
           echo "🚀 Documentation available at: ${DEPLOYMENT_URL}"
 
+      - name: Intentional failure test
+        run: exit 1
+
       - name: Comment on PR about deployment failure
         if: failure() && github.event_name == 'pull_request'
         uses: actions/github-script@v7
